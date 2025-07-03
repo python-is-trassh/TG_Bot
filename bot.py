@@ -15,7 +15,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 # Конфигурация
-API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+API_TOKEN = os.getenv(8150457432:AAHv_sgVXIJCvAKxfHd5oZXmtWKEaQ9Fbjc)
 ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(',')))
 DATABASE_URL = os.getenv('DATABASE_URL')
 
