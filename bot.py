@@ -433,3 +433,83 @@ async def on_startup(dp):
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+
+# Добавляем в StatesGroup новое состояние
+class AdminStates(StatesGroup):
+    # ... предыдущие состояния ...
+    waiting_for_product_to_delete = State()  # Добавляем новое состояние для удаления
+
+# Добавляем кнопку удаления в админ-панель
+@dp.message_handler(text="⚙️ Админ-панель")
+async def admin_panel(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Доступ запрещен!")
+        return
+    
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    buttons = ["📦 Добавить товар", "🗑️ Удалить товар", "📝 Список товаров", "📊 Статистика", "🔙 Назад"]
+    keyboard.add(*buttons)
+    await message.answer("Админ-панель:", reply_markup=keyboard)
+
+# Обработчик команды удаления товара
+@dp.message_handler(text="🗑️ Удалить товар")
+async def delete_product_start(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Доступ запрещен!")
+        return
+    
+    # Показываем список товаров с кнопками удаления
+    conn = await create_db_connection()
+    try:
+        products = await conn.fetch("SELECT * FROM products")
+        
+        if not products:
+            await message.answer("Товаров пока нет.")
+            return
+        
+        keyboard = types.InlineKeyboardMarkup()
+        
+        for product in products:
+            keyboard.add(
+                types.InlineKeyboardButton(
+                    f"❌ {product['id']}. {product['name']}",
+                    callback_data=f"delete_{product['id']}"
+                )
+            )
+        
+        await message.answer("Выберите товар для удаления:", reply_markup=keyboard)
+    finally:
+        await conn.close()
+
+# Обработчик callback для удаления
+@dp.callback_query_handler(lambda c: c.data.startswith('delete_'))
+async def process_delete_product(callback_query: types.CallbackQuery):
+    product_id = int(callback_query.data.split('_')[1])
+    
+    conn = await create_db_connection()
+    try:
+        # Получаем информацию о товаре перед удалением
+        product = await conn.fetchrow("SELECT * FROM products WHERE id = $1", product_id)
+        
+        if not product:
+            await bot.answer_callback_query(callback_query.id, "Товар не найден!")
+            return
+        
+        # Удаляем товар
+        await conn.execute("DELETE FROM products WHERE id = $1", product_id)
+        
+        await bot.answer_callback_query(callback_query.id, "Товар удален!")
+        await bot.send_message(
+            callback_query.from_user.id,
+            f"Товар успешно удален:\n"
+            f"ID: {product['id']}\n"
+            f"Название: {product['name']}\n"
+            f"Цена: {product['price']} руб."
+        )
+        
+        # Обновляем список товаров
+        await delete_product_start(callback_query.message)
+    except Exception as e:
+        await bot.answer_callback_query(callback_query.id, f"Ошибка: {str(e)}")
+    finally:
+        await conn.close()
