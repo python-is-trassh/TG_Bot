@@ -436,9 +436,13 @@ async def contacts(message: types.Message):
         "⏰ Режим работы: Пн-Пт 9:00-18:00"
     )
 
+async def on_startup(dp):
+    await init_db()
+    logging.info("Бот успешно запущен")
+
 async def main():
     await init_db()
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
