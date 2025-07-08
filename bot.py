@@ -1,10 +1,9 @@
 import logging
 import os
-from aiogram import Bot, Dispatcher, types
-from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram import Bot, Dispatcher, types, executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
-from aiogram.utils import executor
+from aiogram.dispatcher.filters.state import State, StatesGroup
 import asyncpg
 from dotenv import load_dotenv
 
@@ -20,10 +19,10 @@ API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ADMIN_IDS = [int(id) for id in os.getenv('ADMIN_IDS', '').split(',') if id]
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# Инициализация бота
+bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(bot, storage=storage)
 
 # Состояния для FSM
 class UserStates(StatesGroup):
@@ -36,7 +35,6 @@ class AdminStates(StatesGroup):
     waiting_for_product_price = State()
     waiting_for_product_description = State()
     waiting_for_product_photo = State()
-    waiting_for_product_to_delete = State()
 
 # Подключение к базе данных
 async def create_db_connection():
@@ -77,6 +75,9 @@ async def init_db():
                 price INTEGER NOT NULL
             )
         ''')
+        logger.info("База данных успешно инициализирована")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
     finally:
         await conn.close()
 
@@ -102,7 +103,7 @@ async def cmd_start(message: types.Message):
 @dp.message_handler(text="⚙️ Админ-панель")
 async def admin_panel(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.answer("Доступ запрещен!")
+        await message.answer("Доступ запрещён!")
         return
     
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -119,7 +120,7 @@ async def back_to_main(message: types.Message):
 @dp.message_handler(text="📦 Добавить товар")
 async def add_product_step1(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.answer("Доступ запрещен!")
+        await message.answer("Доступ запрещён!")
         return
     
     await AdminStates.waiting_for_product_name.set()
@@ -177,7 +178,7 @@ async def add_product_final(message: types.Message, state: FSMContext):
 @dp.message_handler(text="🗑️ Удалить товар")
 async def delete_product_start(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.answer("Доступ запрещен!")
+        await message.answer("Доступ запрещён!")
         return
     
     conn = await create_db_connection()
@@ -223,10 +224,10 @@ async def process_delete_product(callback_query: types.CallbackQuery):
         # Затем удаляем сам товар
         await conn.execute("DELETE FROM products WHERE id = $1", product_id)
         
-        await bot.answer_callback_query(callback_query.id, "✅ Товар удален!")
+        await bot.answer_callback_query(callback_query.id, "✅ Товар удалён!")
         await bot.send_message(
             callback_query.from_user.id,
-            f"🗑️ Товар успешно удален:\n"
+            f"🗑️ Товар успешно удалён:\n"
             f"ID: {product['id']}\n"
             f"Название: {product['name']}\n"
             f"Цена: {product['price']} руб."
@@ -244,7 +245,7 @@ async def process_delete_product(callback_query: types.CallbackQuery):
 @dp.message_handler(text="📝 Список товаров")
 async def show_products_admin(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.answer("Доступ запрещен!")
+        await message.answer("Доступ запрещён!")
         return
     
     conn = await create_db_connection()
@@ -388,7 +389,7 @@ async def show_cart(message: types.Message):
 @dp.message_handler(text="📊 Статистика")
 async def show_stats(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
-        await message.answer("Доступ запрещен!")
+        await message.answer("Доступ запрещён!")
         return
     
     conn = await create_db_connection()
@@ -438,11 +439,7 @@ async def contacts(message: types.Message):
 
 async def on_startup(dp):
     await init_db()
-    logging.info("Бот успешно запущен")
-
-async def main():
-    await init_db()
-    await dp.start_polling(bot)
+    logger.info("Бот успешно запущен")
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
