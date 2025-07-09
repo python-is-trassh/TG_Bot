@@ -315,37 +315,66 @@ async def remove_last_photo(message: types.Message, state: FSMContext):
 
 @dp.message_handler(text="✅ Завершить добавление фото", state=AdminStates.waiting_product_photos)
 async def finish_adding_photos(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    conn = await create_db_connection()
-    if not conn:
-        await message.answer("Ошибка подключения к БД")
-        await state.finish()
-        return
-    
     try:
-        product = await conn.fetchrow(
-            '''INSERT INTO products (name, description, price, photo_ids)
-            VALUES ($1, $2, $3, $4) RETURNING id''',
-            data['name'], data['description'], data['price'], data.get('photo_ids', [])
-        )
+        data = await state.get_data()
         
-        await state.update_data(product_id=product['id'])
-        await AdminStates.waiting_product_items.set()
+        if not all(key in data for key in ['name', 'description', 'price']):
+            await message.answer("❌ Не все данные товара заполнены. Начните заново.")
+            await state.finish()
+            return
         
-        await message.answer(
-            f"✅ Товар добавлен! ID: {product['id']}\n"
-            "Теперь добавьте позиции товара в формате:\n"
-            "<b>Локация, УникальныйКод</b>\n"
-            "Например: Москва, ABC123",
-            reply_markup=types.ReplyKeyboardRemove(),
-            parse_mode="HTML"
-        )
+        photo_ids = data.get('photo_ids', [])
+        
+        conn = await create_db_connection()
+        if not conn:
+            await message.answer("❌ Ошибка подключения к БД")
+            await state.finish()
+            return
+        
+        try:
+            product = await conn.fetchrow(
+                '''INSERT INTO products (name, description, price, photo_ids)
+                VALUES ($1, $2, $3, $4) RETURNING id''',
+                data['name'],
+                data['description'],
+                float(data['price']),
+                photo_ids if photo_ids else None
+            )
+            
+            if not product:
+                await message.answer("❌ Не удалось добавить товар")
+                await state.finish()
+                return
+            
+            await state.update_data(product_id=product['id'])
+            await AdminStates.waiting_product_items.set()
+            
+            await message.answer(
+                f"✅ Товар успешно добавлен! ID: {product['id']}\n"
+                "Теперь добавьте позиции товара в формате:\n"
+                "<b>Локация, УникальныйКод</b>\n"
+                "Например: Москва, ABC123",
+                reply_markup=types.ReplyKeyboardRemove(),
+                parse_mode="HTML"
+            )
+            
+        except asyncpg.exceptions.DataError as e:
+            logger.error(f"Ошибка данных при добавлении товара: {e}")
+            await message.answer("❌ Ошибка в данных товара. Проверьте формат цены.")
+            await state.finish()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении товара: {e}")
+            await message.answer("❌ Произошла ошибка при сохранении товара")
+            await state.finish()
+            
+        finally:
+            await conn.close()
+            
     except Exception as e:
-        logger.error(f"Ошибка сохранения товара: {e}")
-        await message.answer("Ошибка сохранения товара")
+        logger.error(f"Неожиданная ошибка: {e}")
+        await message.answer("❌ Произошла непредвиденная ошибка")
         await state.finish()
-    finally:
-        await conn.close()
 
 @dp.message_handler(state=AdminStates.waiting_product_items)
 async def process_product_items(message: types.Message, state: FSMContext):
@@ -751,4 +780,4 @@ if __name__ == '__main__':
         on_startup=on_startup,
         on_shutdown=on_shutdown,
         skip_updates=True
-    )
+            )
