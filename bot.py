@@ -584,6 +584,68 @@ async def finish_adding_items(message: types.Message, state: FSMContext):
         await conn.close()
         await state.finish()
 
+@dp.message_handler(state=AddProductStates.waiting_for_items)
+async def process_product_items(message: types.Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        if not all(k in data for k in ['name', 'description', 'price', 'photo_ids', 'product_id']):
+            raise ValueError("Недостаточно данных для создания товара")
+
+        # Разделяем ввод на локацию и код
+        parts = message.text.split(',')
+        if len(parts) < 2:
+            raise ValueError("Неверный формат. Нужно: 'Локация, Код'")
+
+        location = parts[0].strip()
+        unique_code = parts[1].strip()
+
+        if not location or not unique_code:
+            raise ValueError("Локация и код не могут быть пустыми")
+
+        conn = None
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+            
+            # Проверяем уникальность кода
+            code_exists = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM product_items WHERE unique_code = $1)",
+                unique_code
+            )
+            if code_exists:
+                await message.answer("Этот код уже используется. Введите другой:")
+                return
+
+            # Добавляем позицию
+            await conn.execute(
+                """INSERT INTO product_items 
+                (product_id, location, unique_code) 
+                VALUES ($1, $2, $3)""",
+                data['product_id'], location, unique_code
+            )
+
+            await message.answer(
+                f"✅ Позиция добавлена:\n"
+                f"📍 Локация: {location}\n"
+                f"🆔 Код: {unique_code}\n\n"
+                f"Отправьте следующую пару или /done для завершения"
+            )
+
+        except asyncpg.UniqueViolationError:
+            await message.answer("❌ Этот код уже существует. Введите другой:")
+        except asyncpg.PostgresError as e:
+            logger.error(f"Ошибка PostgreSQL: {e}")
+            await message.answer("❌ Ошибка базы данных. Попробуйте ещё раз.")
+        finally:
+            if conn:
+                await conn.close()
+
+    except ValueError as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
+        await message.answer("❌ Критическая ошибка. Начните заново.")
+        await state.finish()
+
 # ========== ЗАПУСК ==========
 async def on_startup(dp):
     await init_db()
