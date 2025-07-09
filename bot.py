@@ -8,7 +8,7 @@ from aiogram.utils import executor
 import asyncpg
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения из файла .env
+# Загрузка переменных окружения
 load_dotenv()
 
 # Настройка логирования
@@ -16,47 +16,43 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bot.log'),  # Логи в файл
-        logging.StreamHandler()  # Логи в консоль
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация бота
+# Конфигурация
 API_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(','))) if os.getenv('ADMIN_IDS') else []
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# Инициализация бота и диспетчера
+# Инициализация бота
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# ========== СОСТОЯНИЯ (FSM) ==========
+# ========== СОСТОЯНИЯ ==========
 class AdminStates(StatesGroup):
-    """Класс для хранения состояний админ-панели"""
-    waiting_product_name = State()       # Ожидание названия товара
-    waiting_product_description = State() # Ожидание описания товара
-    waiting_product_price = State()      # Ожидание цены товара
-    waiting_product_photos = State()     # Ожидание фотографий товара
-    waiting_product_items = State()      # Ожидание добавления позиций
+    waiting_product_name = State()
+    waiting_product_description = State()
+    waiting_product_price = State()
+    waiting_product_photos = State()
+    waiting_product_items = State()
 
 # ========== КОРЗИНА ==========
 class Cart:
-    """Класс для работы с корзиной пользователя"""
     def __init__(self, user_id):
         self.user_id = user_id
-        self.items = {}  # {product_id: quantity}
+        self.items = {}
     
     def add_item(self, product_id, quantity=1):
-        """Добавляет товар в корзину"""
         if product_id in self.items:
             self.items[product_id] += quantity
         else:
             self.items[product_id] = quantity
     
     def remove_item(self, product_id, quantity=1):
-        """Удаляет товар из корзины"""
         if product_id in self.items:
             if self.items[product_id] <= quantity:
                 del self.items[product_id]
@@ -66,15 +62,12 @@ class Cart:
         return False
     
     def clear(self):
-        """Очищает корзину"""
         self.items = {}
     
     def get_total_items(self):
-        """Возвращает общее количество товаров в корзине"""
         return sum(self.items.values())
     
     async def get_cart_details(self, conn):
-        """Возвращает детализированную информацию о корзине"""
         if not self.items:
             return None, 0
         
@@ -98,33 +91,27 @@ class Cart:
         
         return products, total_price
 
-# Глобальный словарь для хранения корзин пользователей
 user_carts = {}
 
 def get_user_cart(user_id):
-    """Возвращает корзину пользователя, создает новую если не существует"""
     if user_id not in user_carts:
         user_carts[user_id] = Cart(user_id)
     return user_carts[user_id]
 
-# ========== РАБОТА С БАЗОЙ ДАННЫХ ==========
+# ========== БАЗА ДАННЫХ ==========
 async def create_db_connection():
-    """Создает подключение к базе данных"""
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        return conn
+        return await asyncpg.connect(DATABASE_URL)
     except Exception as e:
         logger.error(f"Ошибка подключения к БД: {e}")
         return None
 
 async def init_db():
-    """Инициализация таблиц в базе данных"""
     conn = await create_db_connection()
     if not conn:
         return False
 
     try:
-        # Создаем таблицу товаров
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS products (
                 id SERIAL PRIMARY KEY,
@@ -137,7 +124,6 @@ async def init_db():
             )
         ''')
 
-        # Создаем таблицу позиций товаров
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS product_items (
                 id SERIAL PRIMARY KEY,
@@ -150,34 +136,30 @@ async def init_db():
             )
         ''')
 
-        # Создаем таблицу заказов
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS orders (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 total_amount DECIMAL(10, 2) NOT NULL,
                 status VARCHAR(20) DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
 
-        # Создаем таблицу позиций заказа
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS order_items (
                 id SERIAL PRIMARY KEY,
                 order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
                 product_id INTEGER REFERENCES products(id),
                 item_id INTEGER REFERENCES product_items(id),
-                price DECIMAL(10, 2) NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
+                price DECIMAL(10, 2) NOT NULL
             )
         ''')
 
-        logger.info("Таблицы базы данных успешно созданы")
+        logger.info("База данных инициализирована")
         return True
     except Exception as e:
-        logger.error(f"Ошибка создания таблиц: {e}")
+        logger.error(f"Ошибка инициализации БД: {e}")
         return False
     finally:
         await conn.close()
@@ -185,30 +167,26 @@ async def init_db():
 # ========== ОСНОВНЫЕ КОМАНДЫ ==========
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = ["🛍️ Каталог", "🛒 Корзина", "ℹ️ Помощь"]
     
-    # Добавляем кнопку админ-панели для администраторов
     if message.from_user.id in ADMIN_IDS:
         buttons.append("⚙️ Админ-панель")
     
     keyboard.add(*buttons)
     
     await message.answer(
-        "👋 Добро пожаловать в магазин цифровых товаров!\n"
-        "Выберите действие:",
+        "👋 Добро пожаловать в магазин цифровых товаров!",
         reply_markup=keyboard
     )
 
 @dp.message_handler(text="ℹ️ Помощь")
 async def show_help(message: types.Message):
-    """Показывает справку по боту"""
     help_text = (
         "ℹ️ <b>Справка по боту</b>\n\n"
-        "🛍️ <b>Каталог</b> - просмотр доступных товаров\n"
-        "🛒 <b>Корзина</b> - просмотр и оформление заказа\n"
-        "⚙️ <b>Админ-панель</b> - управление товарами (только для админов)\n\n"
+        "🛍️ <b>Каталог</b> - просмотр товаров\n"
+        "🛒 <b>Корзина</b> - ваши товары\n"
+        "⚙️ <b>Админ-панель</b> - управление\n\n"
         "Для начала работы нажмите /start"
     )
     await message.answer(help_text, parse_mode="HTML")
@@ -216,7 +194,6 @@ async def show_help(message: types.Message):
 # ========== АДМИН-ПАНЕЛЬ ==========
 @dp.message_handler(text="⚙️ Админ-панель")
 async def admin_panel(message: types.Message):
-    """Главное меню админ-панели"""
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("🚫 Доступ запрещен")
         return
@@ -234,13 +211,11 @@ async def admin_panel(message: types.Message):
 
 @dp.message_handler(text="🔙 Назад")
 async def back_to_main(message: types.Message):
-    """Возврат в главное меню"""
     await cmd_start(message)
 
 # ========== ДОБАВЛЕНИЕ ТОВАРА ==========
 @dp.message_handler(text="📦 Добавить товар")
 async def start_adding_product(message: types.Message):
-    """Начало процесса добавления товара"""
     if message.from_user.id not in ADMIN_IDS:
         return
     
@@ -249,9 +224,8 @@ async def start_adding_product(message: types.Message):
 
 @dp.message_handler(state=AdminStates.waiting_product_name)
 async def process_product_name(message: types.Message, state: FSMContext):
-    """Обработка названия товара"""
     if len(message.text) > 100:
-        await message.answer("Название должно быть не длиннее 100 символов")
+        await message.answer("Название должно быть короче 100 символов")
         return
     
     await state.update_data(name=message.text)
@@ -260,14 +234,12 @@ async def process_product_name(message: types.Message, state: FSMContext):
 
 @dp.message_handler(state=AdminStates.waiting_product_description)
 async def process_product_description(message: types.Message, state: FSMContext):
-    """Обработка описания товара"""
     await state.update_data(description=message.text)
     await AdminStates.waiting_product_price.set()
     await message.answer("Введите цену товара (в рублях):")
 
 @dp.message_handler(state=AdminStates.waiting_product_price)
 async def process_product_price(message: types.Message, state: FSMContext):
-    """Обработка цены товара"""
     try:
         price = round(float(message.text), 2)
         if price <= 0:
@@ -276,17 +248,73 @@ async def process_product_price(message: types.Message, state: FSMContext):
             
         await state.update_data(price=price)
         await AdminStates.waiting_product_photos.set()
-        await message.answer("Отправьте фотографии товара:")
+        
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        keyboard.add("✅ Завершить добавление фото")
+        
+        await message.answer(
+            "Отправьте фотографии товара:",
+            reply_markup=keyboard
+        )
     except ValueError:
-        await message.answer("Пожалуйста, введите корректную цену (число)")
+        await message.answer("Пожалуйста, введите корректную цену")
 
 @dp.message_handler(content_types=types.ContentType.PHOTO, state=AdminStates.waiting_product_photos)
 async def process_product_photos(message: types.Message, state: FSMContext):
-    """Обработка фотографий товара"""
-    photo_ids = [photo.file_id for photo in message.photo]
-    await state.update_data(photo_ids=photo_ids)
+    try:
+        photo_id = message.photo[-1].file_id
+        data = await state.get_data()
+        photo_ids = data.get('photo_ids', [])
+        
+        if len(photo_ids) >= 10:
+            await message.answer("Максимум 10 фото")
+            return
+            
+        photo_ids.append(photo_id)
+        await state.update_data(photo_ids=photo_ids)
+        
+        keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        keyboard.add("✅ Завершить добавление фото")
+        keyboard.add("🖼 Просмотреть фото", "❌ Удалить последнее фото")
+        
+        await message.answer(
+            f"Фото добавлено. Всего: {len(photo_ids)}\n"
+            "Отправьте ещё фото или завершите добавление",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await message.answer("Ошибка обработки фото")
+
+@dp.message_handler(text="🖼 Просмотреть фото", state=AdminStates.waiting_product_photos)
+async def view_added_photos(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    photo_ids = data.get('photo_ids', [])
     
-    # Сохраняем товар в базе данных
+    if not photo_ids:
+        await message.answer("Нет добавленных фото")
+        return
+    
+    media = [types.InputMediaPhoto(photo_ids[0], caption=f"Добавленные фото (1/{len(photo_ids)})")]
+    media.extend([types.InputMediaPhoto(pid) for pid in photo_ids[1:]])
+    
+    await bot.send_media_group(message.chat.id, media)
+
+@dp.message_handler(text="❌ Удалить последнее фото", state=AdminStates.waiting_product_photos)
+async def remove_last_photo(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    photo_ids = data.get('photo_ids', [])
+    
+    if not photo_ids:
+        await message.answer("Нет фото для удаления")
+        return
+    
+    photo_ids.pop()
+    await state.update_data(photo_ids=photo_ids)
+    await message.answer(f"Удалено. Осталось фото: {len(photo_ids)}")
+
+@dp.message_handler(text="✅ Завершить добавление фото", state=AdminStates.waiting_product_photos)
+async def finish_adding_photos(message: types.Message, state: FSMContext):
     data = await state.get_data()
     conn = await create_db_connection()
     if not conn:
@@ -298,27 +326,29 @@ async def process_product_photos(message: types.Message, state: FSMContext):
         product = await conn.fetchrow(
             '''INSERT INTO products (name, description, price, photo_ids)
             VALUES ($1, $2, $3, $4) RETURNING id''',
-            data['name'], data['description'], data['price'], data['photo_ids']
+            data['name'], data['description'], data['price'], data.get('photo_ids', [])
         )
         
         await state.update_data(product_id=product['id'])
         await AdminStates.waiting_product_items.set()
         
         await message.answer(
-            f"✅ Товар успешно добавлен!\n"
-            f"Теперь добавьте позиции. Введите локацию и уникальный код через запятую:\n"
-            f"Пример: Москва, ABC123"
+            f"✅ Товар добавлен! ID: {product['id']}\n"
+            "Теперь добавьте позиции товара в формате:\n"
+            "<b>Локация, УникальныйКод</b>\n"
+            "Например: Москва, ABC123",
+            reply_markup=types.ReplyKeyboardRemove(),
+            parse_mode="HTML"
         )
     except Exception as e:
-        logger.error(f"Ошибка добавления товара: {e}")
-        await message.answer("Ошибка при добавлении товара")
+        logger.error(f"Ошибка сохранения товара: {e}")
+        await message.answer("Ошибка сохранения товара")
         await state.finish()
     finally:
         await conn.close()
 
 @dp.message_handler(state=AdminStates.waiting_product_items)
 async def process_product_items(message: types.Message, state: FSMContext):
-    """Обработка добавления позиций товара"""
     if message.text.lower() == '/done':
         data = await state.get_data()
         conn = await create_db_connection()
@@ -334,9 +364,9 @@ async def process_product_items(message: types.Message, state: FSMContext):
             )
             
             await message.answer(
-                f"✅ Добавление товара завершено!\n"
+                f"✅ Товар полностью добавлен!\n"
                 f"Название: {data.get('name', 'N/A')}\n"
-                f"Добавлено позиций: {items_count}"
+                f"Позиций: {items_count}"
             )
         finally:
             await conn.close()
@@ -367,8 +397,8 @@ async def process_product_items(message: types.Message, state: FSMContext):
             
             await message.answer(
                 f"✅ Позиция добавлена:\n"
-                f"📍 Локация: {location}\n"
-                f"🆔 Код: {code}\n\n"
+                f"Локация: {location}\n"
+                f"Код: {code}\n\n"
                 f"Отправьте следующую пару или /done для завершения"
             )
         except asyncpg.UniqueViolationError:
@@ -385,97 +415,9 @@ async def process_product_items(message: types.Message, state: FSMContext):
             "Пример: Москва, ABC123"
         )
 
-# ========== СПИСОК ТОВАРОВ (АДМИН) ==========
-@dp.message_handler(text="📝 Список товаров")
-async def show_products_list(message: types.Message):
-    """Показывает список всех товаров для администратора"""
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    
-    conn = await create_db_connection()
-    if not conn:
-        await message.answer("Ошибка подключения к БД")
-        return
-    
-    try:
-        products = await conn.fetch("SELECT * FROM products ORDER BY id DESC")
-        if not products:
-            await message.answer("В базе нет товаров")
-            return
-        
-        for product in products:
-            # Получаем количество доступных позиций
-            available = await conn.fetchval(
-                "SELECT COUNT(*) FROM product_items "
-                "WHERE product_id = $1 AND is_sold = FALSE",
-                product['id']
-            )
-            
-            text = (
-                f"🆔 ID: {product['id']}\n"
-                f"📦 Название: {product['name']}\n"
-                f"💰 Цена: {product['price']} руб.\n"
-                f"🛒 Доступно: {available} шт.\n"
-                f"📅 Создан: {product['created_at'].strftime('%d.%m.%Y %H:%M')}"
-            )
-            
-            # Отправляем фото, если они есть
-            if product['photo_ids']:
-                media = [types.InputMediaPhoto(product['photo_ids'][0], caption=text)]
-                for photo_id in product['photo_ids'][1:]:
-                    media.append(types.InputMediaPhoto(photo_id))
-                await bot.send_media_group(message.chat.id, media)
-            else:
-                await message.answer(text)
-                
-    except Exception as e:
-        logger.error(f"Ошибка получения списка товаров: {e}")
-        await message.answer("Ошибка при получении списка товаров")
-    finally:
-        await conn.close()
-
-# ========== СТАТИСТИКА (АДМИН) ==========
-@dp.message_handler(text="📊 Статистика")
-async def show_stats(message: types.Message):
-    """Показывает статистику магазина"""
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    
-    conn = await create_db_connection()
-    if not conn:
-        await message.answer("Ошибка подключения к БД")
-        return
-    
-    try:
-        # Получаем статистику
-        total_products = await conn.fetchval("SELECT COUNT(*) FROM products")
-        total_items = await conn.fetchval("SELECT COUNT(*) FROM product_items")
-        sold_items = await conn.fetchval("SELECT COUNT(*) FROM product_items WHERE is_sold = TRUE")
-        total_orders = await conn.fetchval("SELECT COUNT(*) FROM orders")
-        total_revenue = await conn.fetchval("SELECT COALESCE(SUM(total_amount), 0) FROM orders")
-        
-        # Формируем сообщение
-        stats_text = (
-            "📊 <b>Статистика магазина</b>\n\n"
-            f"📦 Всего товаров: {total_products}\n"
-            f"🛒 Всего позиций: {total_items}\n"
-            f"💰 Продано позиций: {sold_items}\n"
-            f"🧾 Всего заказов: {total_orders}\n"
-            f"💵 Общая выручка: {total_revenue} руб."
-        )
-        
-        await message.answer(stats_text, parse_mode="HTML")
-        
-    except Exception as e:
-        logger.error(f"Ошибка получения статистики: {e}")
-        await message.answer("Ошибка при получении статистики")
-    finally:
-        await conn.close()
-
-# ========== КАТАЛОГ ТОВАРОВ ==========
+# ========== КАТАЛОГ И КОРЗИНА ==========
 @dp.message_handler(text="🛍️ Каталог")
 async def show_catalog(message: types.Message):
-    """Показывает каталог товаров"""
     conn = await create_db_connection()
     if not conn:
         await message.answer("Ошибка подключения к БД")
@@ -492,7 +434,6 @@ async def show_catalog(message: types.Message):
         keyboard = types.InlineKeyboardMarkup(row_width=2)
         
         for product in products:
-            # Проверяем наличие товара
             available = await conn.fetchval(
                 "SELECT COUNT(*) FROM product_items "
                 "WHERE product_id = $1 AND is_sold = FALSE",
@@ -503,27 +444,23 @@ async def show_catalog(message: types.Message):
                 continue
             
             btn_text = f"{product['name']} - {product['price']} руб."
-            callback_data = f"product_{product['id']}"
             keyboard.add(types.InlineKeyboardButton(
-                btn_text, callback_data=callback_data
+                btn_text, callback_data=f"product_{product['id']}"
             ))
         
         await message.answer(
-            "🛍️ <b>Каталог товаров</b>\n\n"
-            "Выберите товар для просмотра:",
+            "🛍️ <b>Каталог товаров</b>",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-        
     except Exception as e:
-        logger.error(f"Ошибка показа каталога: {e}")
-        await message.answer("Ошибка при загрузке каталога")
+        logger.error(f"Ошибка каталога: {e}")
+        await message.answer("Ошибка загрузки каталога")
     finally:
         await conn.close()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('product_'))
 async def show_product_details(callback_query: types.CallbackQuery):
-    """Показывает детали товара"""
     product_id = int(callback_query.data.split('_')[1])
     conn = await create_db_connection()
     if not conn:
@@ -539,7 +476,6 @@ async def show_product_details(callback_query: types.CallbackQuery):
             await callback_query.answer("Товар не найден")
             return
         
-        # Проверяем наличие товара
         available = await conn.fetchval(
             "SELECT COUNT(*) FROM product_items "
             "WHERE product_id = $1 AND is_sold = FALSE",
@@ -562,9 +498,8 @@ async def show_product_details(callback_query: types.CallbackQuery):
             types.InlineKeyboardButton("➕ В корзину", callback_data=f"add_to_cart_{product['id']}"),
             types.InlineKeyboardButton("➖ Из корзины", callback_data=f"remove_from_cart_{product['id']}")
         )
-        keyboard.add(types.InlineKeyboardButton("🛒 Перейти в корзину", callback_data="view_cart"))
+        keyboard.add(types.InlineKeyboardButton("🛒 Корзина", callback_data="view_cart"))
         
-        # Отправляем фото, если они есть
         if product['photo_ids']:
             await bot.send_photo(
                 callback_query.message.chat.id,
@@ -582,17 +517,14 @@ async def show_product_details(callback_query: types.CallbackQuery):
             )
         
         await callback_query.answer()
-        
     except Exception as e:
-        logger.error(f"Ошибка показа товара: {e}")
-        await callback_query.message.answer("Ошибка при загрузке товара")
+        logger.error(f"Ошибка товара: {e}")
+        await callback_query.message.answer("Ошибка загрузки товара")
     finally:
         await conn.close()
 
-# ========== РАБОТА С КОРЗИНОЙ ==========
 @dp.message_handler(text="🛒 Корзина")
 async def view_cart(message: types.Message):
-    """Показывает содержимое корзины пользователя"""
     cart = get_user_cart(message.from_user.id)
     conn = await create_db_connection()
     if not conn:
@@ -610,7 +542,7 @@ async def view_cart(message: types.Message):
             text += (
                 f"📦 {product['name']}\n"
                 f"💰 {product['price']} руб. × {product['quantity']} = "
-                f"<b>{product['price'] * product['quantity']} руб.</b>\n\n"
+                f"{product['price'] * product['quantity']} руб.\n\n"
             )
         
         text += f"💵 <b>Итого: {total_price} руб.</b>"
@@ -621,12 +553,10 @@ async def view_cart(message: types.Message):
             types.InlineKeyboardButton("🗑️ Очистить корзину", callback_data="clear_cart")
         )
         
-        # Отправляем первое фото из первого товара (если есть) как превью корзины
-        first_product = products[0]
-        if first_product['photo']:
+        if products[0]['photo']:
             await bot.send_photo(
                 message.chat.id,
-                first_product['photo'],
+                products[0]['photo'],
                 caption=text,
                 reply_markup=keyboard,
                 parse_mode="HTML"
@@ -637,16 +567,14 @@ async def view_cart(message: types.Message):
                 reply_markup=keyboard,
                 parse_mode="HTML"
             )
-        
     except Exception as e:
-        logger.error(f"Ошибка показа корзины: {e}")
-        await message.answer("Ошибка при загрузке корзины")
+        logger.error(f"Ошибка корзины: {e}")
+        await message.answer("Ошибка загрузки корзины")
     finally:
         await conn.close()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('add_to_cart_'))
 async def add_to_cart(callback_query: types.CallbackQuery):
-    """Добавляет товар в корзину"""
     product_id = int(callback_query.data.split('_')[3])
     cart = get_user_cart(callback_query.from_user.id)
     
@@ -656,7 +584,6 @@ async def add_to_cart(callback_query: types.CallbackQuery):
         return
     
     try:
-        # Проверяем наличие товара
         available = await conn.fetchval(
             "SELECT COUNT(*) FROM product_items "
             "WHERE product_id = $1 AND is_sold = FALSE",
@@ -667,55 +594,48 @@ async def add_to_cart(callback_query: types.CallbackQuery):
             await callback_query.answer("Товар закончился")
             return
         
-        # Проверяем, не превышает ли количество в корзине доступное количество
         current_in_cart = cart.items.get(product_id, 0)
         if current_in_cart >= available:
             await callback_query.answer("Достигнуто максимальное количество")
             return
         
         cart.add_item(product_id)
-        await callback_query.answer(f"Товар добавлен в корзину (всего: {cart.get_total_items()})")
-        
+        await callback_query.answer(f"Добавлено в корзину (Всего: {cart.get_total_items()})")
     except Exception as e:
         logger.error(f"Ошибка добавления в корзину: {e}")
-        await callback_query.answer("Ошибка при добавлении в корзину")
+        await callback_query.answer("Ошибка добавления")
     finally:
         await conn.close()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('remove_from_cart_'))
 async def remove_from_cart(callback_query: types.CallbackQuery):
-    """Удаляет товар из корзины"""
     product_id = int(callback_query.data.split('_')[3])
     cart = get_user_cart(callback_query.from_user.id)
     
     if cart.remove_item(product_id):
-        await callback_query.answer(f"Товар удален из корзины (всего: {cart.get_total_items()})")
+        await callback_query.answer(f"Удалено из корзины (Всего: {cart.get_total_items()})")
     else:
-        await callback_query.answer("Этого товара нет в вашей корзине")
+        await callback_query.answer("Этого товара нет в корзине")
 
 @dp.callback_query_handler(lambda c: c.data == 'view_cart')
 async def callback_view_cart(callback_query: types.CallbackQuery):
-    """Обработчик кнопки просмотра корзины"""
     await callback_query.answer()
     await view_cart(callback_query.message)
 
 @dp.callback_query_handler(lambda c: c.data == 'clear_cart')
 async def clear_cart(callback_query: types.CallbackQuery):
-    """Очищает корзину пользователя"""
     cart = get_user_cart(callback_query.from_user.id)
     cart.clear()
     await callback_query.answer("Корзина очищена")
     await callback_query.message.edit_text("🛒 Ваша корзина пуста")
 
-# ========== ОФОРМЛЕНИЕ ЗАКАЗА ==========
 @dp.callback_query_handler(lambda c: c.data == 'checkout')
 async def checkout(callback_query: types.CallbackQuery):
-    """Оформление заказа"""
     user_id = callback_query.from_user.id
     cart = get_user_cart(user_id)
     
     if not cart.items:
-        await callback_query.answer("Ваша корзина пуста")
+        await callback_query.answer("Корзина пуста")
         return
     
     conn = await create_db_connection()
@@ -724,13 +644,12 @@ async def checkout(callback_query: types.CallbackQuery):
         return
     
     try:
-        # Получаем детали корзины
         products, total_price = await cart.get_cart_details(conn)
         if not products:
-            await callback_query.answer("Ваша корзина пуста")
+            await callback_query.answer("Корзина пуста")
             return
         
-        # Проверяем наличие всех товаров
+        # Проверка наличия
         for product in products:
             available = await conn.fetchval(
                 "SELECT COUNT(*) FROM product_items "
@@ -745,14 +664,14 @@ async def checkout(callback_query: types.CallbackQuery):
                 )
                 return
         
-        # Создаем заказ
+        # Создание заказа
         order_id = await conn.fetchval(
-            '''INSERT INTO orders (user_id, total_amount, status)
-            VALUES ($1, $2, 'pending') RETURNING id''',
+            '''INSERT INTO orders (user_id, total_amount)
+            VALUES ($1, $2) RETURNING id''',
             user_id, total_price
         )
         
-        # Резервируем товары
+        # Резервирование товаров
         for product in products:
             items = await conn.fetch(
                 '''UPDATE product_items
@@ -762,11 +681,10 @@ async def checkout(callback_query: types.CallbackQuery):
                     WHERE product_id = $2 AND is_sold = FALSE
                     LIMIT $3
                 )
-                RETURNING id, unique_code''',
+                RETURNING id''',
                 user_id, product['id'], product['quantity']
             )
             
-            # Добавляем товары в заказ
             for item in items:
                 await conn.execute(
                     '''INSERT INTO order_items (order_id, product_id, item_id, price)
@@ -774,79 +692,63 @@ async def checkout(callback_query: types.CallbackQuery):
                     order_id, product['id'], item['id'], product['price']
                 )
         
-        # Формируем сообщение о заказе
+        # Формирование сообщения
         text = (
             "✅ <b>Заказ оформлен!</b>\n\n"
-            f"🆔 Номер заказа: <code>{order_id}</code>\n"
+            f"🆔 Номер: <code>{order_id}</code>\n"
             f"💵 Сумма: <b>{total_price} руб.</b>\n\n"
-            "Спасибо за покупку! Ваши товары:\n\n"
+            "Ваши товары:\n"
         )
         
         for product in products:
             text += f"📦 {product['name']} × {product['quantity']}\n"
         
-        # Очищаем корзину
         cart.clear()
-        
         await callback_query.message.edit_text(text, parse_mode="HTML")
-        await callback_query.answer()
         
-        # Уведомляем администраторов
-        admin_text = (
-            "🛒 <b>Новый заказ!</b>\n\n"
-            f"🆔 Номер: <code>{order_id}</code>\n"
-            f"👤 Пользователь: @{callback_query.from_user.username or callback_query.from_user.id}\n"
-            f"💵 Сумма: <b>{total_price} руб.</b>"
-        )
-        
+        # Уведомление админов
         for admin_id in ADMIN_IDS:
             try:
-                await bot.send_message(admin_id, admin_text, parse_mode="HTML")
+                await bot.send_message(
+                    admin_id,
+                    f"🛒 Новый заказ #{order_id}\n"
+                    f"👤 Пользователь: {callback_query.from_user.mention}\n"
+                    f"💵 Сумма: {total_price} руб.",
+                    parse_mode="HTML"
+                )
             except Exception as e:
-                logger.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
-        
+                logger.error(f"Ошибка уведомления админа: {e}")
+                
     except Exception as e:
         logger.error(f"Ошибка оформления заказа: {e}")
-        await callback_query.message.answer("Произошла ошибка при оформлении заказа")
+        await callback_query.message.answer("Ошибка оформления заказа")
     finally:
         await conn.close()
 
-# ========== ЗАПУСК БОТА ==========
+# ========== ЗАПУСК ==========
 async def on_startup(dp):
-    """Функция, выполняемая при запуске бота"""
-    logger.info("Запуск бота...")
+    logger.info("Бот запускается...")
     if await init_db():
-        logger.info("База данных готова к работе")
+        logger.info("БД готова")
     else:
-        logger.error("Ошибка инициализации базы данных")
+        logger.error("Ошибка БД")
     
-    # Уведомление админов о запуске
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, "✅ Бот успешно запущен")
+            await bot.send_message(admin_id, "✅ Бот запущен")
         except Exception as e:
-            logger.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+            logger.error(f"Не удалось уведомить админа: {e}")
 
 async def on_shutdown(dp):
-    """Функция, выполняемая при остановке бота"""
-    logger.info("Остановка бота...")
-    # Уведомление админов об остановке
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, "🛑 Бот остановлен")
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
-    
-    # Закрываем соединения
+    logger.info("Бот останавливается...")
     await dp.storage.close()
     await dp.storage.wait_closed()
     logger.info("Бот остановлен")
 
 if __name__ == '__main__':
-    # Запуск бота
     executor.start_polling(
         dp,
         on_startup=on_startup,
         on_shutdown=on_shutdown,
         skip_updates=True
-        )
+    )
