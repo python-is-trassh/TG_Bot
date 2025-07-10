@@ -160,6 +160,12 @@ async def check_bitcoin_payment(address, amount):
 async def cmd_start(message: types.Message):
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.add("🛍️ Каталог", "ℹ️ О магазине")
+
+      # Добавляем кнопку админ-панели только для админов
+    if message.from_user.id in ADMIN_IDS:
+        buttons.append("⚙️ Админ-панель")
+    
+    keyboard.add(*buttons)
     
     await message.answer(
         "👋 Добро пожаловать в наш магазин!\n"
