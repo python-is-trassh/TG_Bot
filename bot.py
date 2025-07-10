@@ -48,16 +48,17 @@ class AdminStates(StatesGroup):
 class UserStates(StatesGroup):
     waiting_payment = State()
 
-# Подключение к БД
+# ========== БАЗОВЫЕ ФУНКЦИИ ==========
 async def create_db_connection():
+    """Создает подключение к базе данных"""
     try:
         return await asyncpg.connect(DATABASE_URL)
     except Exception as e:
         logger.error(f"Ошибка подключения к БД: {e}")
         return None
 
-# Инициализация БД
 async def init_db():
+    """Инициализация структуры базы данных"""
     conn = await create_db_connection()
     if not conn:
         return False
@@ -132,8 +133,8 @@ async def init_db():
     finally:
         await conn.close()
 
-# Проверка Bitcoin платежа
 async def check_bitcoin_payment(address, amount):
+    """Проверяет поступление Bitcoin платежа"""
     try:
         url = f"https://blockchain.info/rawaddr/{address}"
         response = requests.get(url)
@@ -158,10 +159,11 @@ async def check_bitcoin_payment(address, amount):
 # ========== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ==========
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
+    """Обработчик команды /start"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("🛍️ Каталог", "ℹ️ О магазине")
-
-      # Добавляем кнопку админ-панели только для админов
+    buttons = ["🛍️ Каталог", "ℹ️ О магазине"]
+    
+    # Добавляем кнопку админ-панели только для админов
     if message.from_user.id in ADMIN_IDS:
         buttons.append("⚙️ Админ-панель")
     
@@ -175,6 +177,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message_handler(text="ℹ️ О магазине")
 async def show_about(message: types.Message):
+    """Показывает информацию о магазине"""
     conn = await create_db_connection()
     if not conn:
         await message.answer("Ошибка подключения к БД")
@@ -191,6 +194,7 @@ async def show_about(message: types.Message):
 
 @dp.message_handler(text="🛍️ Каталог")
 async def show_categories(message: types.Message):
+    """Показывает список категорий товаров"""
     conn = await create_db_connection()
     if not conn:
         await message.answer("Ошибка подключения к БД")
@@ -443,10 +447,12 @@ async def check_payment(message: types.Message, state: FSMContext):
     finally:
         await conn.close()
         await state.finish()
-
+        
+        
 # ========== АДМИН ПАНЕЛЬ ==========
-@dp.message_handler(commands=['admin'])
+@dp.message_handler(text="⚙️ Админ-панель")
 async def admin_panel(message: types.Message):
+    """Главное меню админ-панели"""
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("Доступ запрещен")
         return
@@ -465,8 +471,8 @@ async def admin_panel(message: types.Message):
 
 @dp.message_handler(text="🔙 В меню")
 async def back_to_menu(message: types.Message):
+    """Возврат в главное меню"""
     await cmd_start(message)
-
 # Добавление категории
 @dp.message_handler(text="➕ Добавить категорию")
 async def add_category_start(message: types.Message):
@@ -951,8 +957,10 @@ async def edit_about_finish(message: types.Message, state: FSMContext):
         await state.finish()
         await admin_panel(message)
 
+
 # ========== ЗАПУСК БОТА ==========
 async def on_startup(dp):
+    """Действия при запуске бота"""
     logger.info("Запуск бота...")
     if await init_db():
         logger.info("База данных готова")
@@ -967,15 +975,17 @@ async def on_startup(dp):
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
 async def on_shutdown(dp):
+    """Действия при остановке бота"""
     logger.info("Остановка бота...")
     await dp.storage.close()
     await dp.storage.wait_closed()
     logger.info("Бот остановлен")
 
 if __name__ == '__main__':
+    # Запуск бота
     executor.start_polling(
         dp,
         on_startup=on_startup,
         on_shutdown=on_shutdown,
         skip_updates=True
-                          )
+        )
