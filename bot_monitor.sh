@@ -1,7 +1,7 @@
 #!/bin/bash
 
-BOT_DIR="/root/Bot"
-BOT_SCRIPT="bot.py"
+BOT_DIR="/root/TG_Bot"
+BOT_SCRIPT="tg_bot.py"
 LOG_FILE="$BOT_DIR/bot_monitor.log"
 MAX_RESTARTS=10
 SLEEP_INTERVAL=30
