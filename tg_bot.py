@@ -699,10 +699,10 @@ async def set_price_in_usd(message: types.Message, state: FSMContext):
     await message.answer("Введите цену товара в USD:", reply_markup=types.ReplyKeyboardRemove())
 
 @dp.message_handler(state=AdminStates.waiting_product_price_usd)
-async def add_product_price_usd(message: types.Message, state: FSMContext):
+async def add_product_price_rub(message: types.Message, state: FSMContext):
     try:
-        price_usd = float(message.text)
-        if price_usd <= 0:
+        price_rub = float(message.text)
+        if price_rub <= 0:
             raise ValueError
         
         # Конвертируем USD в BTC по текущему курсу
@@ -711,11 +711,11 @@ async def add_product_price_usd(message: types.Message, state: FSMContext):
             await message.answer("❌ Не удалось получить текущий курс Bitcoin. Пожалуйста, попробуйте позже.")
             return
         
-        price_btc = price_usd / btc_rate
+        price_btc = price_rub / btc_rate
         
-        await state.update_data(price_btc=price_btc, price_usd=price_usd)
+        await state.update_data(price_btc=price_btc, price_rub=price_rub)
         await AdminStates.waiting_product_content.set()
-        await message.answer(f"Цена установлена: {price_usd:.2f}$ (~{format_btc(price_btc)} BTC)\n\nТеперь введите контент товара (текст/ссылка, который получит пользователь после оплаты):")
+        await message.answer(f"Цена установлена: {price_rub:.2f}$ (~{format_btc(price_btc)} BTC)\n\nТеперь введите контент товара (текст/ссылка, который получит пользователь после оплаты):")
     except ValueError:
         await message.answer("❌ Пожалуйста, введите корректную цену (число больше 0)")
 
@@ -726,7 +726,7 @@ async def add_product_price_btc(message: types.Message, state: FSMContext):
         if price_btc <= 0:
             raise ValueError
         
-        await state.update_data(price_btc=price_btc, price_usd=None)
+        await state.update_data(price_btc=price_btc, price_rub=None)
         await AdminStates.waiting_product_content.set()
         await message.answer("Введите контент товара (текст/ссылка, который получит пользователь после оплаты):")
     except ValueError:
@@ -750,13 +750,13 @@ async def add_product_locations(message: types.Message, state: FSMContext):
     try:
         # Добавляем товар
         product = await conn.fetchrow(
-            "INSERT INTO products (category_id, name, description, price_btc, price_usd, content) "
+            "INSERT INTO products (category_id, name, description, price_btc, price_rub, content) "
             "VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
             data['category_id'],
             data['name'],
             data['description'],
             data['price_btc'],
-            data.get('price_usd'),
+            data.get('price_rub'),
             data['content']
         )
         
