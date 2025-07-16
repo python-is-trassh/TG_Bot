@@ -3,9 +3,9 @@ import logging
 import requests
 from decimal import Decimal, getcontext
 from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 import asyncpg
 from dotenv import load_dotenv
@@ -37,7 +37,7 @@ BITCOIN_WALLET = os.getenv('BITCOIN_WALLET')
 # Инициализация бота
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(bot, storage=storage)
 
 # Кэш курса Bitcoin
 bitcoin_rate_cache = {
@@ -369,7 +369,7 @@ async def show_product_details(callback_query: types.CallbackQuery):
         await conn.close()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('location_'))
-async def process_location_selection(callback_query: types.CallbackQuery, state: FSMContext):
+async def process_location_selection(callback_query: types.CallbackQuery):
     location_id = int(callback_query.data.split('_')[1])
     conn = await create_db_connection()
     if not conn:
@@ -404,6 +404,7 @@ async def process_location_selection(callback_query: types.CallbackQuery, state:
                 amount_btc = Decimal(str(location['price_btc']))
                 amount_rub = amount_btc * btc_rate
             
+            state = dp.current_state(user=callback_query.from_user.id, chat=callback_query.message.chat.id)
             await state.update_data(
                 product_id=location['product_id'],
                 location_id=location_id,
@@ -429,6 +430,7 @@ async def process_location_selection(callback_query: types.CallbackQuery, state:
                 "После оплаты нажмите кнопку ниже.",
                 parse_mode="HTML"
             )
+            await UserStates.waiting_payment.set()
             await callback_query.answer()
             
     except Exception as e:
@@ -436,71 +438,70 @@ async def process_location_selection(callback_query: types.CallbackQuery, state:
         await callback_query.message.answer("Ошибка оформления")
     finally:
         await conn.close()
-        await state.set_state(UserStates.waiting_payment)
 
 @dp.message_handler(state=UserStates.waiting_payment)
 async def check_payment(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    conn = await create_db_connection()
-    if not conn:
-        await message.answer("Ошибка подключения к БД")
-        await state.clear()
-        return
-    
-    try:
-        is_paid = await check_bitcoin_payment(data['payment_address'], data['amount_btc'])
-        
-        if not is_paid:
-            await message.answer("❌ Платеж не обнаружен. Попробуйте позже.")
+    async with state.proxy() as data:
+        conn = await create_db_connection()
+        if not conn:
+            await message.answer("Ошибка подключения к БД")
+            await state.finish()
             return
         
-        async with conn.transaction():
-            await conn.execute(
-                "UPDATE locations SET quantity = quantity - 1 WHERE id = $1",
-                data['location_id']
+        try:
+            is_paid = await check_bitcoin_payment(data['payment_address'], data['amount_btc'])
+            
+            if not is_paid:
+                await message.answer("❌ Платеж не обнаружен. Попробуйте позже.")
+                return
+            
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE locations SET quantity = quantity - 1 WHERE id = $1",
+                    data['location_id']
+                )
+                
+                await conn.execute(
+                    """INSERT INTO orders 
+                    (product_id, location_id, user_id, bitcoin_address, 
+                     amount_btc, amount_rub, exchange_rate, content, is_paid)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)""",
+                    data['product_id'],
+                    data['location_id'],
+                    message.from_user.id,
+                    data['payment_address'],
+                    Decimal(str(data['amount_btc'])),
+                    Decimal(str(data['amount_rub'])),
+                    Decimal(str(data['exchange_rate'])),
+                    data['product_content']
+                )
+            
+            await message.answer(
+                "✅ Платеж подтвержден! Ваш товар:\n\n"
+                f"{data['product_content']}\n\n"
+                "Спасибо за покупку!",
+                parse_mode="HTML"
             )
             
-            await conn.execute(
-                """INSERT INTO orders 
-                (product_id, location_id, user_id, bitcoin_address, 
-                 amount_btc, amount_rub, exchange_rate, content, is_paid)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)""",
-                data['product_id'],
-                data['location_id'],
-                message.from_user.id,
-                data['payment_address'],
-                Decimal(str(data['amount_btc'])),
-                Decimal(str(data['amount_rub'])),
-                Decimal(str(data['exchange_rate'])),
-                data['product_content']
-            )
-        
-        await message.answer(
-            "✅ Платеж подтвержден! Ваш товар:\n\n"
-            f"{data['product_content']}\n\n"
-            "Спасибо за покупку!",
-            parse_mode="HTML"
-        )
-        
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"🛒 Новый заказ!\n"
-                    f"👤 Пользователь: @{message.from_user.username or message.from_user.id}\n"
-                    f"💰 Сумма: {format_btc(data['amount_btc'])} BTC (~{data['amount_rub']:.2f}₽)\n"
-                    f"📦 Товар ID: {data['product_id']}",
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа: {e}")
-        
-    except Exception as e:
-        logger.error(f"Ошибка обработки платежа: {e}")
-        await message.answer("❌ Ошибка обработки платежа")
-    finally:
-        await conn.close()
-        await state.clear()
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"🛒 Новый заказ!\n"
+                        f"👤 Пользователь: @{message.from_user.username or message.from_user.id}\n"
+                        f"💰 Сумма: {format_btc(data['amount_btc'])} BTC (~{data['amount_rub']:.2f}₽)\n"
+                        f"📦 Товар ID: {data['product_id']}",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка уведомления админа: {e}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки платежа: {e}")
+            await message.answer("❌ Ошибка обработки платежа")
+        finally:
+            await conn.close()
+            await state.finish()
 
 # ========== АДМИН ПАНЕЛЬ ==========
 @dp.message_handler(text="⚙️ Админ-панель")
@@ -1039,6 +1040,7 @@ async def edit_about_finish(message: types.Message, state: FSMContext):
         await state.finish()
         await admin_panel(message)
 
+
 # ========== ЗАПУСК БОТА ==========
 async def on_startup(dp):
     logger.info("Запуск бота...")
@@ -1053,15 +1055,5 @@ async def on_startup(dp):
         except Exception as e:
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
-async def on_shutdown(dp):
-    logger.info("Остановка бота...")
-    await dp.storage.close()
-    logger.info("Бот остановлен")
-
 if __name__ == '__main__':
-    executor.start_polling(
-        dp,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        skip_updates=True
-        )
+    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
