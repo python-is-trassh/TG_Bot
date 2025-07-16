@@ -1,17 +1,21 @@
 import os
 import logging
 import requests
+from decimal import Decimal, getcontext
 from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from aiogram.utils import executor
 import asyncpg
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
-# Загрузка переменных окружения
+# Настройка окружения
 load_dotenv()
+
+# Конфигурация Decimal
+getcontext().prec = 8
 
 # Настройка логирования
 logging.basicConfig(
@@ -33,9 +37,9 @@ BITCOIN_WALLET = os.getenv('BITCOIN_WALLET')
 # Инициализация бота
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
-# Кэш для курса Bitcoin
+# Кэш курса Bitcoin
 bitcoin_rate_cache = {
     'rate': None,
     'last_updated': None
@@ -47,7 +51,7 @@ class AdminStates(StatesGroup):
     waiting_product_name = State()
     waiting_product_description = State()
     waiting_product_price = State()
-    waiting_product_price_usd = State()
+    waiting_product_price_rub = State()
     waiting_product_content = State()
     waiting_product_locations = State()
     waiting_about_text = State()
@@ -59,14 +63,13 @@ class UserStates(StatesGroup):
 async def create_db_connection():
     """Создает подключение к базе данных"""
     try:
-        return await asyncpg.connect(DATABASE_URL)
+        return await asyncpg.connect(DATABASE_URL, timeout=30)
     except Exception as e:
         logger.error(f"Ошибка подключения к БД: {e}")
         return None
 
 async def get_bitcoin_rate():
-    """Получает текущий курс Bitcoin к USD"""
-    # Проверяем, есть ли актуальный кэш (не старше 5 минут)
+    """Получает текущий курс Bitcoin к RUB"""
     if (bitcoin_rate_cache['last_updated'] and 
         (datetime.now() - bitcoin_rate_cache['last_updated']) < timedelta(minutes=5)):
         return bitcoin_rate_cache['rate']
@@ -75,37 +78,57 @@ async def get_bitcoin_rate():
         url = "https://blockchain.info/ticker"
         response = requests.get(url)
         data = response.json()
-        rate = data['USD']['last']
+        rate = data['RUB']['last']
         
-        # Обновляем кэш
-        bitcoin_rate_cache['rate'] = rate
+        bitcoin_rate_cache['rate'] = Decimal(str(rate))
         bitcoin_rate_cache['last_updated'] = datetime.now()
-        
-        return rate
+        return bitcoin_rate_cache['rate']
     except Exception as e:
         logger.error(f"Ошибка получения курса Bitcoin: {e}")
         return None
 
 def format_btc(amount):
-    """Форматирует сумму BTC с точностью до 8 знаков"""
-    return f"{amount:.8f}".rstrip('0').rstrip('.') if '.' in f"{amount:.8f}" else f"{amount:.8f}"
+    """Форматирует сумму BTC"""
+    return f"{Decimal(amount):.8f}".rstrip('0').rstrip('.') if '.' in f"{Decimal(amount):.8f}" else f"{Decimal(amount):.8f}"
 
-async def usd_to_btc(usd_amount):
-    """Конвертирует USD в BTC по текущему курсу"""
+async def rub_to_btc(rub_amount):
+    """Конвертирует RUB в BTC"""
     rate = await get_bitcoin_rate()
     if not rate:
         return None
-    return usd_amount / rate
+    return Decimal(str(rub_amount)) / rate
 
-async def btc_to_usd(btc_amount):
-    """Конвертирует BTC в USD по текущему курсу"""
+async def btc_to_rub(btc_amount):
+    """Конвертирует BTC в RUB"""
     rate = await get_bitcoin_rate()
     if not rate:
         return None
-    return btc_amount * rate
+    return Decimal(str(btc_amount)) * rate
+
+async def check_bitcoin_payment(address, amount):
+    """Проверяет Bitcoin-платеж"""
+    try:
+        url = f"https://blockchain.info/rawaddr/{address}"
+        response = requests.get(url)
+        data = response.json()
+        
+        total_received = Decimal(data['total_received']) / Decimal(10**8)
+        
+        for tx in data['txs']:
+            tx_time = datetime.fromtimestamp(tx['time'])
+            if (datetime.now() - tx_time).total_seconds() > 7200:
+                continue
+                
+            for output in tx['out']:
+                if output['addr'] == address and Decimal(output['value']) / Decimal(10**8) >= Decimal(amount):
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка проверки платежа: {e}")
+        return False
 
 async def init_db():
-    """Инициализация структуры базы данных"""
+    """Инициализация БД"""
     conn = await create_db_connection()
     if not conn:
         return False
@@ -126,7 +149,7 @@ async def init_db():
                 name VARCHAR(100) NOT NULL,
                 description TEXT,
                 price_btc DECIMAL(16, 8) NOT NULL,
-                price_usd DECIMAL(10, 2),
+                price_rub DECIMAL(12, 2),
                 content TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT NOW(),
                 is_active BOOLEAN DEFAULT TRUE,
@@ -152,8 +175,8 @@ async def init_db():
                 user_id BIGINT NOT NULL,
                 bitcoin_address VARCHAR(100) NOT NULL,
                 amount_btc DECIMAL(16, 8) NOT NULL,
-                amount_usd DECIMAL(10, 2) NOT NULL,
-                exchange_rate DECIMAL(10, 2) NOT NULL,
+                amount_rub DECIMAL(12, 2) NOT NULL,
+                exchange_rate DECIMAL(12, 2) NOT NULL,
                 content TEXT NOT NULL,
                 is_paid BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT NOW()
@@ -168,14 +191,12 @@ async def init_db():
             )
         ''')
 
-        # Добавляем текст "о магазине" по умолчанию
         await conn.execute('''
             INSERT INTO shop_info (about_text) 
             VALUES ('Добро пожаловать в наш магазин!')
             ON CONFLICT (id) DO NOTHING
         ''')
 
-        logger.info("База данных инициализирована")
         return True
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
@@ -183,51 +204,24 @@ async def init_db():
     finally:
         await conn.close()
 
-async def check_bitcoin_payment(address, amount):
-    """Проверяет поступление Bitcoin платежа"""
-    try:
-        url = f"https://blockchain.info/rawaddr/{address}"
-        response = requests.get(url)
-        data = response.json()
-        
-        total_received = data['total_received'] / 100000000  # Конвертация из сатоши
-        
-        # Проверяем последние транзакции (максимум за последние 2 часа)
-        for tx in data['txs']:
-            tx_time = datetime.fromtimestamp(tx['time'])
-            if (datetime.now() - tx_time).total_seconds() > 7200:
-                continue
-                
-            for output in tx['out']:
-                if output['addr'] == address and output['value'] / 100000000 >= amount:
-                    return True
-        return False
-    except Exception as e:
-        logger.error(f"Ошибка проверки Bitcoin платежа: {e}")
-        return False
-
 # ========== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ==========
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = ["🛍️ Каталог", "ℹ️ О магазине"]
     
-    # Добавляем кнопку админ-панели только для админов
     if message.from_user.id in ADMIN_IDS:
         buttons.append("⚙️ Админ-панель")
     
     keyboard.add(*buttons)
     
     await message.answer(
-        "👋 Добро пожаловать в наш магазин!\n"
-        "Выберите действие:",
+        "👋 Добро пожаловать в наш магазин!\nВыберите действие:",
         reply_markup=keyboard
     )
 
 @dp.message_handler(text="ℹ️ О магазине")
 async def show_about(message: types.Message):
-    """Показывает информацию о магазине"""
     conn = await create_db_connection()
     if not conn:
         await message.answer("Ошибка подключения к БД")
@@ -237,14 +231,13 @@ async def show_about(message: types.Message):
         about_text = await conn.fetchval("SELECT about_text FROM shop_info WHERE id = 1")
         await message.answer(about_text)
     except Exception as e:
-        logger.error(f"Ошибка получения информации о магазине: {e}")
-        await message.answer("Информация о магазине временно недоступна")
+        logger.error(f"Ошибка получения информации: {e}")
+        await message.answer("Информация временно недоступна")
     finally:
         await conn.close()
 
 @dp.message_handler(text="🛍️ Каталог")
 async def show_categories(message: types.Message):
-    """Показывает список категорий товаров"""
     conn = await create_db_connection()
     if not conn:
         await message.answer("Ошибка подключения к БД")
@@ -256,7 +249,7 @@ async def show_categories(message: types.Message):
         )
         
         if not categories:
-            await message.answer("Категории товаров пока отсутствуют")
+            await message.answer("Категории пока отсутствуют")
             return
         
         keyboard = types.InlineKeyboardMarkup()
@@ -266,10 +259,7 @@ async def show_categories(message: types.Message):
                 callback_data=f"category_{category['id']}"
             ))
         
-        await message.answer(
-            "📂 Выберите категорию:",
-            reply_markup=keyboard
-        )
+        await message.answer("📂 Выберите категорию:", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка загрузки категорий: {e}")
         await message.answer("Ошибка загрузки категорий")
@@ -291,7 +281,7 @@ async def show_category_products(callback_query: types.CallbackQuery):
         )
         
         products = await conn.fetch(
-            "SELECT id, name, price_btc, price_usd FROM products WHERE category_id = $1 AND is_active = TRUE ORDER BY name",
+            "SELECT id, name, price_btc, price_rub FROM products WHERE category_id = $1 AND is_active = TRUE ORDER BY name",
             category_id
         )
         
@@ -301,10 +291,9 @@ async def show_category_products(callback_query: types.CallbackQuery):
         
         keyboard = types.InlineKeyboardMarkup()
         for product in products:
-            # Отображаем цену в BTC и USD, если указана USD цена
             price_text = f"{format_btc(product['price_btc'])} BTC"
-            if product['price_usd']:
-                price_text += f" (~{product['price_usd']}$)"
+            if product['price_rub']:
+                price_text += f" (~{product['price_rub']:.2f}₽)"
             
             keyboard.add(types.InlineKeyboardButton(
                 f"{product['name']} - {price_text}",
@@ -312,8 +301,7 @@ async def show_category_products(callback_query: types.CallbackQuery):
             ))
         
         await callback_query.message.edit_text(
-            f"📦 Категория: {category_name}\n\n"
-            "Выберите товар:",
+            f"📦 Категория: {category_name}\n\nВыберите товар:",
             reply_markup=keyboard
         )
         await callback_query.answer()
@@ -333,7 +321,7 @@ async def show_product_details(callback_query: types.CallbackQuery):
     
     try:
         product = await conn.fetchrow(
-            "SELECT p.id, p.name, p.description, p.price_btc, p.price_usd, c.name as category_name "
+            "SELECT p.id, p.name, p.description, p.price_btc, p.price_rub, c.name as category_name "
             "FROM products p JOIN categories c ON p.category_id = c.id "
             "WHERE p.id = $1",
             product_id
@@ -346,13 +334,12 @@ async def show_product_details(callback_query: types.CallbackQuery):
         )
         
         if not locations:
-            await callback_query.answer("Нет доступных локаций для этого товара")
+            await callback_query.answer("Нет доступных локаций")
             return
         
-        # Формируем текст с ценами
         price_text = f"💰 Цена: <b>{format_btc(product['price_btc'])} BTC</b>"
-        if product['price_usd']:
-            price_text += f" (~{product['price_usd']}$)"
+        if product['price_rub']:
+            price_text += f" (~{product['price_rub']:.2f}₽)"
         
         text = (
             f"📦 <b>{product['name']}</b>\n"
@@ -382,7 +369,7 @@ async def show_product_details(callback_query: types.CallbackQuery):
         await conn.close()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('location_'))
-async def process_location_selection(callback_query: types.CallbackQuery):
+async def process_location_selection(callback_query: types.CallbackQuery, state: FSMContext):
     location_id = int(callback_query.data.split('_')[1])
     conn = await create_db_connection()
     if not conn:
@@ -390,70 +377,66 @@ async def process_location_selection(callback_query: types.CallbackQuery):
         return
     
     try:
-        location = await conn.fetchrow(
-            "SELECT l.id, l.name, l.quantity, p.id as product_id, p.name as product_name, p.price_btc, p.price_usd "
-            "FROM locations l JOIN products p ON l.product_id = p.id "
-            "WHERE l.id = $1",
-            location_id
-        )
-        
-        if not location or location['quantity'] <= 0:
-            await callback_query.answer("Эта локация больше недоступна")
-            return
-        
-        # Получаем текущий курс BTC
-        btc_rate = await get_bitcoin_rate()
-        if not btc_rate:
-            await callback_query.message.answer("❌ Не удалось получить текущий курс Bitcoin. Пожалуйста, попробуйте позже.")
-            return
-        
-        # Определяем сумму к оплате
-        if location['price_usd']:
-            # Если есть цена в USD, конвертируем по текущему курсу
-            amount_btc = await usd_to_btc(location['price_usd'])
-            amount_usd = location['price_usd']
-        else:
-            # Иначе используем цену в BTC
-            amount_btc = location['price_btc']
-            amount_usd = await btc_to_usd(location['price_btc'])
-        
-        # Генерируем уникальный Bitcoin адрес для платежа
-        payment_address = BITCOIN_WALLET
-        
-        # Формируем текст с ценами
-        price_text = (
-            f"💰 Сумма к оплате: <b>{format_btc(amount_btc)} BTC</b>\n"
-            f"💵 (~{amount_usd:.2f}$ по курсу {btc_rate:.2f}$/BTC)\n\n"
-        )
-        
-        await callback_query.message.edit_text(
-            f"💳 Оформление заказа:\n\n"
-            f"📦 Товар: <b>{location['product_name']}</b>\n"
-            f"📍 Локация: <b>{location['name']}</b>\n"
-            f"{price_text}"
-            f"Отправьте указанную сумму на Bitcoin адрес:\n"
-            f"<code>{payment_address}</code>\n\n"
-            "После оплаты нажмите кнопку ниже для проверки платежа.",
-            parse_mode="HTML"
-        )
-        
-        # Сохраняем информацию о заказе
-        await UserStates.waiting_payment.set()
-        state = dp.current_state(user=callback_query.from_user.id, chat=callback_query.message.chat.id)
-        await state.update_data(
-            product_id=location['product_id'],
-            location_id=location_id,
-            payment_address=payment_address,
-            amount_btc=amount_btc,
-            amount_usd=amount_usd,
-            exchange_rate=btc_rate
-        )
-        
+        async with conn.transaction():
+            location = await conn.fetchrow(
+                """SELECT l.id, l.name, l.quantity, 
+                          p.id as product_id, p.name as product_name, 
+                          p.price_btc, p.price_rub, p.content
+                   FROM locations l 
+                   JOIN products p ON l.product_id = p.id
+                   WHERE l.id = $1 FOR UPDATE""",
+                location_id
+            )
+            
+            if not location or location['quantity'] <= 0:
+                await callback_query.answer("Локация недоступна")
+                return
+            
+            btc_rate = await get_bitcoin_rate()
+            if not btc_rate:
+                await callback_query.message.answer("Ошибка получения курса")
+                return
+            
+            if location['price_rub']:
+                amount_rub = Decimal(str(location['price_rub']))
+                amount_btc = amount_rub / btc_rate
+            else:
+                amount_btc = Decimal(str(location['price_btc']))
+                amount_rub = amount_btc * btc_rate
+            
+            await state.update_data(
+                product_id=location['product_id'],
+                location_id=location_id,
+                payment_address=BITCOIN_WALLET,
+                amount_btc=float(amount_btc),
+                amount_rub=float(amount_rub),
+                exchange_rate=float(btc_rate),
+                product_content=location['content']
+            )
+            
+            price_text = (
+                f"💰 Сумма к оплате: <b>{format_btc(amount_btc)} BTC</b>\n"
+                f"💵 (~{amount_rub:.2f}₽ по курсу {btc_rate:.2f}₽/BTC)\n\n"
+            )
+            
+            await callback_query.message.edit_text(
+                f"💳 Оформление заказа:\n\n"
+                f"📦 Товар: <b>{location['product_name']}</b>\n"
+                f"📍 Локация: <b>{location['name']}</b>\n"
+                f"{price_text}"
+                f"Отправьте указанную сумму на Bitcoin адрес:\n"
+                f"<code>{BITCOIN_WALLET}</code>\n\n"
+                "После оплаты нажмите кнопку ниже.",
+                parse_mode="HTML"
+            )
+            await callback_query.answer()
+            
     except Exception as e:
         logger.error(f"Ошибка оформления заказа: {e}")
-        await callback_query.message.answer("Ошибка оформления заказа")
+        await callback_query.message.answer("Ошибка оформления")
     finally:
         await conn.close()
+        await state.set_state(UserStates.waiting_payment)
 
 @dp.message_handler(state=UserStates.waiting_payment)
 async def check_payment(message: types.Message, state: FSMContext):
@@ -461,67 +444,52 @@ async def check_payment(message: types.Message, state: FSMContext):
     conn = await create_db_connection()
     if not conn:
         await message.answer("Ошибка подключения к БД")
-        await state.finish()
+        await state.clear()
         return
     
     try:
-        # Проверяем платеж
         is_paid = await check_bitcoin_payment(data['payment_address'], data['amount_btc'])
         
         if not is_paid:
-            await message.answer("❌ Платеж не обнаружен. Пожалуйста, попробуйте позже или свяжитесь с поддержкой.")
+            await message.answer("❌ Платеж не обнаружен. Попробуйте позже.")
             return
         
-        # Получаем контент товара
-        product = await conn.fetchrow(
-            "SELECT p.content, l.name as location_name "
-            "FROM products p JOIN locations l ON p.id = l.product_id "
-            "WHERE l.id = $1",
-            data['location_id']
-        )
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE locations SET quantity = quantity - 1 WHERE id = $1",
+                data['location_id']
+            )
+            
+            await conn.execute(
+                """INSERT INTO orders 
+                (product_id, location_id, user_id, bitcoin_address, 
+                 amount_btc, amount_rub, exchange_rate, content, is_paid)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)""",
+                data['product_id'],
+                data['location_id'],
+                message.from_user.id,
+                data['payment_address'],
+                Decimal(str(data['amount_btc'])),
+                Decimal(str(data['amount_rub'])),
+                Decimal(str(data['exchange_rate'])),
+                data['product_content']
+            )
         
-        if not product:
-            await message.answer("❌ Ошибка: товар не найден")
-            await state.finish()
-            return
-        
-        # Помечаем локацию как проданную (уменьшаем количество)
-        await conn.execute(
-            "UPDATE locations SET quantity = quantity - 1 WHERE id = $1",
-            data['location_id']
-        )
-        
-        # Сохраняем заказ
-        await conn.execute(
-            "INSERT INTO orders (product_id, location_id, user_id, bitcoin_address, amount_btc, amount_usd, exchange_rate, content, is_paid) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)",
-            data['product_id'],
-            data['location_id'],
-            message.from_user.id,
-            data['payment_address'],
-            data['amount_btc'],
-            data['amount_usd'],
-            data['exchange_rate'],
-            product['content']
-        )
-        
-        # Отправляем контент пользователю
         await message.answer(
             "✅ Платеж подтвержден! Ваш товар:\n\n"
-            f"{product['content']}\n\n"
+            f"{data['product_content']}\n\n"
             "Спасибо за покупку!",
             parse_mode="HTML"
         )
         
-        # Уведомляем администраторов
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(
                     admin_id,
                     f"🛒 Новый заказ!\n"
                     f"👤 Пользователь: @{message.from_user.username or message.from_user.id}\n"
-                    f"💰 Сумма: {format_btc(data['amount_btc'])} BTC (~{data['amount_usd']:.2f}$)\n"
-                    f"📍 Локация: {product['location_name']}",
+                    f"💰 Сумма: {format_btc(data['amount_btc'])} BTC (~{data['amount_rub']:.2f}₽)\n"
+                    f"📦 Товар ID: {data['product_id']}",
                     parse_mode="HTML"
                 )
             except Exception as e:
@@ -529,16 +497,14 @@ async def check_payment(message: types.Message, state: FSMContext):
         
     except Exception as e:
         logger.error(f"Ошибка обработки платежа: {e}")
-        await message.answer("❌ Произошла ошибка при обработке платежа")
+        await message.answer("❌ Ошибка обработки платежа")
     finally:
         await conn.close()
-        await state.finish()
-        
-        
+        await state.clear()
+
 # ========== АДМИН ПАНЕЛЬ ==========
 @dp.message_handler(text="⚙️ Админ-панель")
 async def admin_panel(message: types.Message):
-    """Главное меню админ-панели"""
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("Доступ запрещен")
         return
@@ -1073,17 +1039,14 @@ async def edit_about_finish(message: types.Message, state: FSMContext):
         await state.finish()
         await admin_panel(message)
 
-
 # ========== ЗАПУСК БОТА ==========
 async def on_startup(dp):
-    """Действия при запуске бота"""
     logger.info("Запуск бота...")
     if await init_db():
-        logger.info("База данных готова")
+        logger.info("БД готова")
     else:
         logger.error("Ошибка инициализации БД")
     
-    # Уведомление админов
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(admin_id, "✅ Бот запущен")
@@ -1091,14 +1054,11 @@ async def on_startup(dp):
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
 async def on_shutdown(dp):
-    """Действия при остановке бота"""
     logger.info("Остановка бота...")
     await dp.storage.close()
-    await dp.storage.wait_closed()
     logger.info("Бот остановлен")
 
 if __name__ == '__main__':
-    # Запуск бота
     executor.start_polling(
         dp,
         on_startup=on_startup,
